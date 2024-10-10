@@ -102,14 +102,6 @@ def main():
                     last_sample, source.SAMPLE_RATE, source.SAMPLE_WIDTH)
                 wav_data = io.BytesIO(audio_data.get_wav_data())
 
-                # #Write wav data to the temporary file as bytes.
-                # with open(temp_file, "wb") as f:
-                #     f.write(wav_data.read())
-
-                # Write wate to backup.wav file
-                # with open("backup.wav", "wb") as f:
-                #     f.write(wav_data.read())
-
                 # Read the transcription.
                 text = ""
 
