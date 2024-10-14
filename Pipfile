@@ -4,9 +4,8 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-pyaudio = "*"
-speechrecognition = "*"
-faster-whisper = "*"
+rich = "*"
+realtimestt = "*"
 
 [dev-packages]
 

@@ -1,144 +1,181 @@
-import argparse
-import speech_recognition as sr
-from faster_whisper import WhisperModel
-from queue import Queue
-from tempfile import NamedTemporaryFile
-from datetime import datetime, timedelta
-import io
-import os
-from time import sleep
+EXTENDED_LOGGING = False
 
+if __name__ == '__main__':
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-s", "--show_microphones", action='store_true',
-                        help="Show available microphones.")
-    parser.add_argument("-m", "--microphone", default=None,
-                        help="Microphone index to use.", type=int)
-    parser.add_argument("-e", "--energy_threshold", default=1000,
-                        help="Energy level for mic to detect.", type=int)
-    parser.add_argument("--translation_lang", default='English',
-                        help="Which language should we translate into.", type=str)
-    parser.add_argument("--record_timeout", default=2,
-                        help="How real time the recording is in seconds.", type=float)
-    parser.add_argument("--phrase_timeout", default=3,
-                        help="How much empty space between recordings before we "
-                             "consider it a new line in the transcription.", type=float)
-    args = parser.parse_args()
+    import subprocess
+    import sys
 
-    if args.show_microphones:
-        show_microphones()
-        return
+    def install_rich():
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "rich"])
 
-    # The last time a recording was retreived from the queue.
-    phrase_time = None
-    # Current raw audio bytes.
-    last_sample = bytes()
-    # Thread safe Queue for passing data from the threaded recording callback.
-    data_queue = Queue()
+    try:
+        import rich
+    except ImportError:
+        user_input = input(
+            "This demo needs the 'rich' library, which is not installed.\nDo you want to install it now? (y/n): ")
+        if user_input.lower() == 'y':
+            try:
+                install_rich()
+                import rich
+                print("Successfully installed 'rich'.")
+            except Exception as e:
+                print(f"An error occurred while installing 'rich': {e}")
+                sys.exit(1)
+        else:
+            print("The program requires the 'rich' library to run. Exiting...")
+            sys.exit(1)
 
-    recorder = sr.Recognizer()
-    recorder.energy_threshold = args.energy_threshold
-    # Definitely do this, dynamic energy compensation lowers the energy threshold dramtically to a point where the SpeechRecognizer never stops recording.
-    recorder.dynamic_energy_threshold = False
+    if EXTENDED_LOGGING:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
 
-    if args.microphone is not None:
-        source = sr.Microphone(sample_rate=16000)
-    else:
-        source = sr.Microphone(sample_rate=16000, device_index=args.microphone)
+    from rich.console import Console
+    from rich.live import Live
+    from rich.text import Text
+    from rich.panel import Panel
+    from rich.spinner import Spinner
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+    console = Console()
+    # console.print("[bold yellow]System initializing, please wait...[/bold yellow]")
+    console.print("System initializing, please wait")
 
-    model_size = "large-v3"
-    audio_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    import os
+    import sys
+    from RealtimeSTT import AudioToTextRecorder
+    from colorama import Fore, Style
+    import colorama
 
-    record_timeout = args.record_timeout
-    phrase_timeout = args.phrase_timeout
+    if os.name == "nt" and (3, 8) <= sys.version_info < (3, 99):
+        from torchaudio._extension.utils import _init_dll_path
+        _init_dll_path()
 
-    temp_file = NamedTemporaryFile().name
-    transcription = ['']
+    colorama.init()
 
-    recognizer = sr.Recognizer()
-    with source as source:
-        recorder.adjust_for_ambient_noise(source)
+    # Initialize Rich Console and Live
+    live = Live(console=console, refresh_per_second=10, screen=False)
+    live.start()
 
-    def record_callback(_, audio: sr.AudioData) -> None:
-        """
-        Threaded callback function to recieve audio data when recordings finish.
-        audio: An AudioData containing the recorded bytes.
-        """
-        # Grab the raw bytes and push it into the thread safe queue.
-        data = audio.get_raw_data()
-        data_queue.put(data)
+    full_sentences = []
+    rich_text_stored = ""
+    recorder = None
+    displayed_text = ""  # Used for tracking text that was already displayed
 
-    # Create a background thread that will pass us raw audio bytes.
-    # We could do this manually but SpeechRecognizer provides a nice helper.
-    recorder.listen_in_background(
-        source, record_callback, phrase_time_limit=record_timeout)
+    end_of_sentence_detection_pause = 0.45
+    unknown_sentence_detection_pause = 0.7
+    mid_sentence_detection_pause = 2.0
 
-    # Cue the user that we're ready to go.
-    print("Model loaded.\n")
+    def clear_console():
+        os.system('clear' if os.name == 'posix' else 'cls')
 
-    while True:
-        try:
-            now = datetime.now()
-            # Pull raw recorded audio from the queue.
-            if not data_queue.empty():
+    prev_text = ""
 
-                phrase_complete = False
-                # If enough time has passed between recordings, consider the phrase complete.
-                # Clear the current working audio buffer to start over with the new data.
-                if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
-                    last_sample = bytes()
-                    phrase_complete = True
-                # This is the last time we received new audio data from the queue.
-                phrase_time = now
+    def preprocess_text(text):
+        # Remove leading whitespaces
+        text = text.lstrip()
 
-                # Concatenate our current audio data with the latest audio data.
-                while not data_queue.empty():
-                    data = data_queue.get()
-                    last_sample += data
+        #  Remove starting ellipses if present
+        if text.startswith("..."):
+            text = text[3:]
 
-                # Use AudioData to convert the raw data to wav data.
-                audio_data = sr.AudioData(
-                    last_sample, source.SAMPLE_RATE, source.SAMPLE_WIDTH)
-                wav_data = io.BytesIO(audio_data.get_wav_data())
+        # Remove any leading whitespaces again after ellipses removal
+        text = text.lstrip()
 
-                # Read the transcription.
-                text = ""
+        # Uppercase the first letter
+        if text:
+            text = text[0].upper() + text[1:]
 
-                # segments, info = audio_model.transcribe("backup.wav")
-                segments, info = audio_model.transcribe(wav_data)
-                for segment in segments:
-                    text += segment.text
+        return text
 
-                # If we detected a pause between recordings, add a new item to our transcripion.
-                # Otherwise edit the existing one.
-                if phrase_complete:
-                    transcription.append(text)
-                else:
-                    transcription[-1] = text
+    def text_detected(text):
+        global prev_text, displayed_text, rich_text_stored
 
-                # Clear the console to reprint the updated transcription.
-                # os.system('cls' if os.name == 'nt' else 'clear')
-                for line in transcription:
-                    print(line)
-                # Flush stdout.
-                print('', end='', flush=True)
+        text = preprocess_text(text)
 
-                last_four_elements = transcription[-10:]
-                result = ''.join(last_four_elements)
+        sentence_end_marks = ['.', '!', '?', '。']
+        if text.endswith("..."):
+            recorder.post_speech_silence_duration = mid_sentence_detection_pause
+        elif text and text[-1] in sentence_end_marks and prev_text and prev_text[-1] in sentence_end_marks:
+            recorder.post_speech_silence_duration = end_of_sentence_detection_pause
+        else:
+            recorder.post_speech_silence_duration = unknown_sentence_detection_pause
+
+        prev_text = text
+
+        # Build Rich Text with alternating colors
+        rich_text = Text()
+        for i, sentence in enumerate(full_sentences):
+            if i % 2 == 0:
+                # rich_text += Text(sentence, style="bold yellow") + Text(" ")
+                rich_text += Text(sentence, style="yellow") + Text(" ")
             else:
-                sleep(0.25)
+                rich_text += Text(sentence, style="cyan") + Text(" ")
 
-        except KeyboardInterrupt:
-            print("Exiting...")
-            break
+        # If the current text is not a sentence-ending, display it in real-time
+        if text:
+            rich_text += Text(text, style="bold yellow")
 
+        new_displayed_text = rich_text.plain
 
-def show_microphones():
-    for index, name in enumerate(sr.Microphone.list_microphone_names()):
-        print(f"Microphone with name \"{
-              name}\" found for `Microphone(device_index={index})`")
+        if new_displayed_text != displayed_text:
+            displayed_text = new_displayed_text
+            panel = Panel(
+                rich_text, title="[bold green]Live Transcription[/bold green]", border_style="bold green")
+            live.update(panel)
+            rich_text_stored = rich_text
 
+    def process_text(text):
+        global recorder, full_sentences, prev_text
+        recorder.post_speech_silence_duration = unknown_sentence_detection_pause
+        text = preprocess_text(text)
+        text = text.rstrip()
+        if text.endswith("..."):
+            text = text[:-2]
 
-if __name__ == "__main__":
-    main()
+        full_sentences.append(text)
+        prev_text = ""
+        text_detected("")
+
+    # Recorder configuration
+    recorder_config = {
+        'spinner': False,
+        # or large-v2 or deepdml/faster-whisper-large-v3-turbo-ct2 or ...
+        # 'model': 'distil-medium.en',
+        'model': 'large-v3',
+        # 'input_device_index': 0,
+        # or small.en or distil-small.en or ...
+        'realtime_model_type': 'tiny.en',
+        'language': 'en',
+        'silero_sensitivity': 0.05,
+        'webrtc_sensitivity': 3,
+        'post_speech_silence_duration': unknown_sentence_detection_pause,
+        'min_length_of_recording': 1.1,
+        'min_gap_between_recordings': 0,
+        'enable_realtime_transcription': True,
+        'realtime_processing_pause': 0.02,
+        'on_realtime_transcription_update': text_detected,
+        # 'on_realtime_transcription_stabilized': text_detected,
+        'silero_deactivity_detection': True,
+        'early_transcription_on_silence': 0,
+        'beam_size': 5,
+        'beam_size_realtime': 3,
+        'no_log_file': True,
+        'initial_prompt': "Use ellipses for incomplete sentences like: I went to the..."
+    }
+
+    if EXTENDED_LOGGING:
+        recorder_config['level'] = logging.DEBUG
+
+    recorder = AudioToTextRecorder(**recorder_config)
+
+    initial_text = Panel(Text("Say something...", style="cyan bold"),
+                         title="[bold yellow]Waiting for Input[/bold yellow]", border_style="bold yellow")
+    live.update(initial_text)
+
+    try:
+        while True:
+            recorder.text(process_text)
+    except KeyboardInterrupt:
+        live.stop()
+        console.print(
+            "[bold red]Transcription stopped by user. Exiting...[/bold red]")
+        exit(0)
